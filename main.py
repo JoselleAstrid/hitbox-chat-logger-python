@@ -5,6 +5,7 @@ import logging
 import os
 import random
 import sys
+import time
 
 import requests
 import websockets
@@ -54,6 +55,9 @@ class ChatClient():
         # "time until disconnected".
         self.disconnect_check_interval_seconds = 10
         
+        # If a connect attempt fails, wait this long until another attempt.
+        self.connect_retry_seconds = 10
+        
         channel_name_input = input("Which streamer's chat are you joining?: ")
         self.channel_name = channel_name_input.lower()
         
@@ -83,12 +87,49 @@ class ChatClient():
             
         # Prepare log file for append writes.
         self.log_file = open(log_filename, 'a')
+        
+    def write(self, s, logging_level=None, server_status=False, chat_log=False,
+        timestamp=False, include_date=False):
+    
+        if include_date:
+            date_format = '%Y/%m/%d %H:%M:%S'
+        else:
+            date_format = '%H:%M:%S'
+        
+        timestamp_obj = datetime.datetime.now()
+        timestamp_str = timestamp_obj.strftime(date_format)
+        to_write = "[{}] {}".format(timestamp_str, s)
+            
+        if logging_level:
+            logging.log(logging_level, to_write)
+        elif server_status:
+            # Not really in a logging.log category, and still something
+            # we want to differentiate from normal chat messages.
+            print(".........." + to_write)
+        elif chat_log:
+            # Something we'd put in the chat log file.
+            print(to_write)
+            self.log_file.write(to_write + '\n')
+        # Turns out there are no other kinds of messages that we'd run
+        # through this function at the moment.
 
     @asyncio.coroutine
     def connect(self):
         
         chat_servers_url = 'http://api.hitbox.tv/chat/servers?redis=true'
-        response = requests.get(chat_servers_url)
+        
+        response = None
+        while not response:
+            try:
+                response = requests.get(chat_servers_url)
+            except requests.exceptions.ConnectionError:
+                s = (
+                    "Connect failed. Trying again in {} seconds."
+                ).format(self.connect_retry_seconds)
+                self.write(s, timestamp=True, server_status=True)
+                
+                yield from asyncio.sleep(self.connect_retry_seconds)
+                
         server_ip = response.json()[0]['server_ip']
         
         websocket_id_url = server_ip + '/socket.io/1/'
@@ -109,10 +150,10 @@ class ChatClient():
             
             if received_message is None:
                 # Websocket connection has failed. Need to reconnect.
-                print(
-                    "*** Disconnected; websocket connection failed."
+                self.write((
+                    "Disconnected; websocket connection failed."
                     " Attempting to reconnect..."
-                )
+                ), timestamp=True, server_status=True)
                 self.futures['check_for_disconnect'].cancel()
                 self.futures['wait_for_messages'].cancel()
                 return
@@ -133,22 +174,15 @@ class ChatClient():
                 }
                 reply_to_send = '5:::' + json.dumps(wrap_message(send_d))
                 
-                timestamp_obj = utc_to_local(self.time_last_received)
-                timestamp_str = timestamp_obj.strftime('%Y/%m/%d %H:%M:%S')
-                s = "*** [{}] Joining channel: {}".format(
-                    timestamp_str, self.channel_name,
-                )
-                self.log_file.write(s + '\n')
-                print(s)
+                s = "*** Joining channel: {}".format(self.channel_name)
+                self.write(s, timestamp=True, chat_log=True, include_date=True)
                 
             elif received_message == '2::':
                 # Ping. Respond with a pong.
                 reply_to_send = '2::'
                 
-                timestamp_obj = utc_to_local(self.time_last_received)
-                timestamp_str = timestamp_obj.strftime('%H:%M:%S')
-                s = "[{}] Ping received; sending pong".format(timestamp_str)
-                logging.info(s)
+                s = "Ping received; sending pong"
+                self.write(s, logging_level=logging.INFO, timestamp=True)
                 
             elif received_message.startswith('5:::'):
                 receive_d = unwrap_message(json.loads(
@@ -159,14 +193,10 @@ class ChatClient():
                     params = receive_d['params']
                     username = params['name']
                     text = params['text']
-                    timestamp_obj = datetime.datetime.fromtimestamp(params['time'])
-                    timestamp_str = timestamp_obj.strftime('%H:%M:%S')
                     
                     # Log the message.
-                    message_str = \
-                        '[{}] <{}> {}'.format(timestamp_str, username, text)
-                    self.log_file.write(message_str + '\n')
-                    print(message_str)
+                    s = '<{}> {}'.format(username, text)
+                    self.write(s, timestamp=True, chat_log=True)
                     reply_to_send = None
                     
                 else:
@@ -190,10 +220,11 @@ class ChatClient():
             
             time_now = datetime.datetime.utcnow()
             if time_now - self.time_last_received > self.time_until_disconnected:
-                print((
-                    "*** Disconnected? No messages for at least {} seconds."
+                s = (
+                    "Disconnected? No messages for at least {} seconds."
                     " Attempting to reconnect..."
-                ).format(self.time_until_disconnected.total_seconds()))
+                ).format(self.time_until_disconnected.total_seconds())
+                self.write(s, timestamp=True, server_status=True)
                 self.futures['wait_for_messages'].cancel()
                 self.futures['check_for_disconnect'].cancel()
                 return
