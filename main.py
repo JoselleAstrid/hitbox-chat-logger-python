@@ -8,6 +8,11 @@ import sys
 
 import requests
 import websockets
+                
+                
+                
+def utc_to_local(utc_time):
+    return utc_time.replace(tzinfo=datetime.timezone.utc).astimezone(tz=None)
 
 
 
@@ -31,11 +36,23 @@ class ChatClient():
     
     def __init__(self):
         
-        # TODO: Have a way to set this to WARNING
+        # TODO: Have a way to set this to another level like WARNING
         logging.basicConfig(
-            format='..........%(levelname)s:%(message)s',
+            format='..........%(levelname)s: %(message)s',
             level=logging.INFO
         )
+        
+        # Save the futures of the chat client tasks so we can cancel them
+        # if needed.
+        self.futures = dict()
+        
+        # If we receive no server messages for this long (including pings),
+        # then we'll consider ourselves disconnected.
+        self.time_until_disconnected = datetime.timedelta(seconds=100)
+        
+        # How often to compare the time since the last message versus the
+        # "time until disconnected".
+        self.disconnect_check_interval_seconds = 10
         
         channel_name_input = input("Which streamer's chat are you joining?: ")
         self.channel_name = channel_name_input.lower()
@@ -81,13 +98,26 @@ class ChatClient():
         
         ws_url = 'ws://' + websocket_id_url + 'websocket/' + connection_id
         self.websocket = yield from websockets.connect(ws_url)
+        self.time_last_received = datetime.datetime.utcnow()
     
     @asyncio.coroutine
     def wait_for_messages(self):
         
         while True:
             received_message = yield from self.websocket.recv()
-            logging.info(' << ' + received_message)
+            logging.debug(' << ' + str(received_message))
+            
+            if received_message is None:
+                # Websocket connection has failed. Need to reconnect.
+                print(
+                    "*** Disconnected; websocket connection failed."
+                    " Attempting to reconnect..."
+                )
+                self.futures['check_for_disconnect'].cancel()
+                self.futures['wait_for_messages'].cancel()
+                return
+                
+            self.time_last_received = datetime.datetime.utcnow()
             
             if received_message == '1::':
                 # Connect confirmation.
@@ -103,7 +133,7 @@ class ChatClient():
                 }
                 reply_to_send = '5:::' + json.dumps(wrap_message(send_d))
                 
-                timestamp_obj = datetime.datetime.now()
+                timestamp_obj = utc_to_local(self.time_last_received)
                 timestamp_str = timestamp_obj.strftime('%Y/%m/%d %H:%M:%S')
                 s = "*** [{}] Joining channel: {}".format(
                     timestamp_str, self.channel_name,
@@ -114,6 +144,11 @@ class ChatClient():
             elif received_message == '2::':
                 # Ping. Respond with a pong.
                 reply_to_send = '2::'
+                
+                timestamp_obj = utc_to_local(self.time_last_received)
+                timestamp_str = timestamp_obj.strftime('%H:%M:%S')
+                s = "[{}] Ping received; sending pong".format(timestamp_str)
+                logging.info(s)
                 
             elif received_message.startswith('5:::'):
                 receive_d = unwrap_message(json.loads(
@@ -144,8 +179,24 @@ class ChatClient():
                 
             if reply_to_send:
                 # Send our reply, if any.
-                yield from self.websocket.send(reply_to_send)
-                logging.info(' >> ' + reply_to_send)
+                status = yield from self.websocket.send(reply_to_send)
+                logging.debug(' >> ' + reply_to_send)
+    
+    @asyncio.coroutine
+    def check_for_disconnect(self):
+        
+        while True:
+            yield from asyncio.sleep(self.disconnect_check_interval_seconds)
+            
+            time_now = datetime.datetime.utcnow()
+            if time_now - self.time_last_received > self.time_until_disconnected:
+                print((
+                    "*** Disconnected? No messages for at least {} seconds."
+                    " Attempting to reconnect..."
+                ).format(self.time_until_disconnected.total_seconds()))
+                self.futures['wait_for_messages'].cancel()
+                self.futures['check_for_disconnect'].cancel()
+                return
                 
     def part_channel(self):
         # Leave the channel (there's no server disconnect command).
@@ -173,6 +224,22 @@ class ChatClient():
 if __name__ == '__main__':
     
     client = ChatClient()
-    asyncio.get_event_loop().run_until_complete(client.connect())
-    asyncio.get_event_loop().run_until_complete(client.wait_for_messages())
+    
+    while True:
+        asyncio.get_event_loop().run_until_complete(client.connect())
+        
+        # Set up the chat client functions as concurrent tasks.
+        client.futures['wait_for_messages'] = \
+            asyncio.async(client.wait_for_messages())
+        client.futures['check_for_disconnect'] = \
+            asyncio.async(client.check_for_disconnect())
+            
+        # These tasks will run forever until one of two things happens:
+        #
+        # (1) A chat disconnect is detected, in which case the tasks will
+        # cancel themselves, and we will go back to the top of the while
+        # loop here.
+        # (2) Something crashes.
+        tasks = [future for k,future in client.futures.items()]
+        asyncio.get_event_loop().run_until_complete(asyncio.wait(tasks))
     
