@@ -14,6 +14,65 @@ import websockets
                 
 def utc_to_local(utc_time):
     return utc_time.replace(tzinfo=datetime.timezone.utc).astimezone(tz=None)
+    
+    
+    
+def print_error_and_exit(s):
+    print(s)
+    # Before proceeding with ending the program, let the console window stay
+    # up by prompting for input. This lets the user read what went wrong.
+    input("(Press Enter to close the program)")
+    sys.exit()
+    
+    
+    
+class Prefs():
+    
+    default_file_contents = (
+        "log_directory = logs\n"
+        "status_display_level = error\n"
+    )
+    filename = 'prefs.txt'
+    prefs = None
+                 
+    @classmethod
+    def create_file(cls):
+        with open(cls.filename, 'w') as f:
+            f.write(cls.default_file_contents)
+        
+    @classmethod
+    def load_from_file(cls):
+        cls.prefs = dict()
+        
+        with open(cls.filename, 'r') as f:
+            for line_num, line in enumerate(f, 1):
+                line = line.strip()
+                if len(line) == 0:
+                    continue
+                
+                try:
+                    name, value = line.split('=')
+                except ValueError as e:
+                    print_error_and_exit((
+                        "prefs.txt: Line {} couldn't be read."
+                        " Must have exactly one equals sign."
+                    ).format(line_num))
+                    
+                name = name.strip()
+                value = value.strip()
+                cls.prefs[name] = value
+                
+    @classmethod
+    def get(cls, name):
+        if name in cls.prefs:
+            return cls.prefs[name]
+        else:
+            print_error_and_exit((
+                "prefs.txt: Couldn't find the preference '{}'."
+                " If you have any trouble fixing this, just delete prefs.txt,"
+                " and a new one should be created the next time you run this"
+                " program."
+            ).format(name))
 
 
 
@@ -35,12 +94,11 @@ def wrap_message(msg_d):
 
 class ChatClient():
     
-    def __init__(self):
+    def __init__(self, log_directory, logging_level):
         
-        # TODO: Have a way to set this to another level like WARNING
         logging.basicConfig(
             format='..........%(levelname)s: %(message)s',
-            level=logging.INFO
+            level=logging_level
         )
         
         # Save the futures of the chat client tasks so we can cancel them
@@ -53,7 +111,9 @@ class ChatClient():
         
         # How often to compare the time since the last message versus the
         # "time until disconnected".
-        self.disconnect_check_interval_seconds = 10
+        # Also determines the max time we have to wait to stop the program
+        # with Ctrl+C.
+        self.disconnect_check_interval_seconds = 5
         
         # If a connect attempt fails, wait this long until another attempt.
         self.connect_retry_seconds = 10
@@ -67,12 +127,13 @@ class ChatClient():
         
         chat_server_label = 'hitbox'
         log_filename = '{}__{}.txt'.format(chat_server_label, self.channel_name)
+        log_path = os.path.join(log_directory, log_filename)
         
         # If the log file exists, show the latest lines from it.
-        if os.path.isfile(log_filename):
+        if os.path.isfile(log_path):
             print("Found a log file for this chat.")
             print("---------- Last few lines from log ----------")
-            with open(log_filename, 'r') as existing_log_file:
+            with open(log_path, 'r') as existing_log_file:
                 # Make a pass through the file to count lines
                 line_count = sum(1 for line in existing_log_file)
                 # Reset the file pointer to the beginning
@@ -84,9 +145,21 @@ class ChatClient():
             print("---------- End of log sample ----------")
         else:
             print("You haven't logged anything from this chat yet.")
+        print("\n")
             
         # Prepare log file for append writes.
-        self.log_file = open(log_filename, 'a')
+        try:
+            self.log_file = open(log_path, 'a')
+        except FileNotFoundError:
+            # Seems the leaf directory for the log file doesn't exist.
+            try:
+                os.mkdir(log_directory)
+                self.log_file = open(log_path, 'a')
+            except OSError:
+                print_error_and_exit(
+                    "Couldn't create the directory for the log file. Please"
+                    " check prefs.txt to see if it was typed correctly."
+                )
         
     def write(self, s, logging_level=None, server_status=False, chat_log=False,
         timestamp=False, include_date=False):
@@ -221,7 +294,7 @@ class ChatClient():
             time_now = datetime.datetime.utcnow()
             if time_now - self.time_last_received > self.time_until_disconnected:
                 s = (
-                    "Disconnected? No messages for at least {} seconds."
+                    "Disconnected? No server interaction for at least {} seconds."
                     " Attempting to reconnect..."
                 ).format(self.time_until_disconnected.total_seconds())
                 self.write(s, timestamp=True, server_status=True)
@@ -229,24 +302,24 @@ class ChatClient():
                 self.futures['check_for_disconnect'].cancel()
                 return
                 
-    def part_channel(self):
-        # Leave the channel (there's no server disconnect command).
-        send_d = {
-            'method': 'partChannel',
-            'params': {
-                'channel': self.channel_name,
-                'name': self.my_username,
-            },
-        }
-        reply_to_send = '5:::' + json.dumps(wrap_message(send_d))
+    # def part_channel(self):
+    #     # Leave the channel (there's no server disconnect command).
+    #     send_d = {
+    #         'method': 'partChannel',
+    #         'params': {
+    #             'channel': self.channel_name,
+    #             'name': self.my_username,
+    #         },
+    #     }
+    #     reply_to_send = '5:::' + json.dumps(wrap_message(send_d))
         
-        logging.info(' >> ' + reply_to_send)
-        yield from self.websocket.send(reply_to_send)
-        "Leaving the channel."
+    #     logging.info(' >> ' + reply_to_send)
+    #     yield from self.websocket.send(reply_to_send)
+    #     "Leaving the channel."
         
-        # Exit the program.
-        self.log_file.close()
-        sys.exit()
+    #     # Exit the program.
+    #     self.log_file.close()
+    #     sys.exit()
 
 
 
@@ -254,12 +327,37 @@ class ChatClient():
 
 if __name__ == '__main__':
     
-    client = ChatClient()
+    # Load preferences.
+    try:
+        Prefs.load_from_file()
+    except IOError:
+        Prefs.create_file()
+        Prefs.load_from_file()
+        
+    # Get logging level from prefs.
+    logging_level_str_to_const = dict(
+        critical = logging.CRITICAL,
+        error = logging.ERROR,
+        warning = logging.WARNING,
+        info = logging.INFO,
+        debug = logging.DEBUG,
+    )
+    # Prefs calls it 'status_display_level' to avoid end-user confusion
+    # with the chat-log file (which also has the word 'log' in it).
+    logging_level = logging_level_str_to_const[
+        Prefs.get('status_display_level').lower()
+    ]
     
+    # Initialize chat client.
+    client = ChatClient(Prefs.get('log_directory'), logging_level)
+    
+    
+    # Run chat client.
     while True:
+        # Connect to the server.
         asyncio.get_event_loop().run_until_complete(client.connect())
         
-        # Set up the chat client functions as concurrent tasks.
+        # Set up the main chat client functions as concurrent tasks.
         client.futures['wait_for_messages'] = \
             asyncio.async(client.wait_for_messages())
         client.futures['check_for_disconnect'] = \
@@ -270,7 +368,7 @@ if __name__ == '__main__':
         # (1) A chat disconnect is detected, in which case the tasks will
         # cancel themselves, and we will go back to the top of the while
         # loop here.
-        # (2) Something crashes.
+        # (2) Something crashes or we press Ctrl+C.
         tasks = [future for k,future in client.futures.items()]
         asyncio.get_event_loop().run_until_complete(asyncio.wait(tasks))
     
