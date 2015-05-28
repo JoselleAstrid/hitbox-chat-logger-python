@@ -11,7 +11,17 @@ What this program does and doesn't do:
 * If no server messages or pings are received for a while, the program will assume it's disconnected and will attempt a reconnect. If a connect fails, it'll attempt to re-connect after waiting a bit.
 * On hitbox.tv, it shows you some recent messages (which happened when you were not there) when you enter a channel, but this program does not support that feature.
 
-## Setup and running (from source)
+## Setup and running
+
+#### From Windows release
+
+* Download the release's .zip file. Unzip it with 7-Zip, WinRAR, etc.
+* Find the `main.exe` file inside and run it.
+* If it can't run and complains about a Visual C++ redistributable, an MSVCR .dll, or something like that, try installing the Microsoft Visual C++ 2010 Redistributable Package for your version of Windows:
+  * 32-bit: https://www.microsoft.com/en-gb/download/details.aspx?id=5555
+  * 64-bit: https://www.microsoft.com/en-us/download/details.aspx?id=14632
+
+#### From source code
 
 * Get Python 3.4 or higher, since this program uses asyncio. (Tested with version 3.4.3)
 * Install the Python packages `requests` and `websockets`. (Tested with requests 2.7.0 and websockets 2.4)
