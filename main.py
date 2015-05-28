@@ -127,13 +127,13 @@ class ChatClient():
         
         chat_server_label = 'hitbox'
         log_filename = '{}__{}.txt'.format(chat_server_label, self.channel_name)
-        log_path = os.path.join(log_directory, log_filename)
+        self.log_filepath = os.path.join(log_directory, log_filename)
         
         # If the log file exists, show the latest lines from it.
-        if os.path.isfile(log_path):
+        if os.path.isfile(self.log_filepath):
             print("Found a log file for this chat.")
             print("---------- Last few lines from log ----------")
-            with open(log_path, 'r') as existing_log_file:
+            with open(self.log_filepath, 'r') as existing_log_file:
                 # Make a pass through the file to count lines
                 line_count = sum(1 for line in existing_log_file)
                 # Reset the file pointer to the beginning
@@ -144,22 +144,20 @@ class ChatClient():
                         print(line.strip())
             print("---------- End of log sample ----------")
         else:
+            # Log file doesn't exist; how about the directory for log files?
+            if not os.path.isdir(log_directory):
+                # How about creating it?
+                try:
+                    os.mkdir(log_directory)
+                except OSError:
+                    print_error_and_exit(
+                        "The log file directory doesn't exist and couldn't be"
+                        " created. Please check prefs.txt to see if it was"
+                        " typed correctly."
+                    )
             print("You haven't logged anything from this chat yet.")
+        # Now we should be set to write to the log filepath.
         print("\n")
-            
-        # Prepare log file for append writes.
-        try:
-            self.log_file = open(log_path, 'a')
-        except FileNotFoundError:
-            # Seems the leaf directory for the log file doesn't exist.
-            try:
-                os.mkdir(log_directory)
-                self.log_file = open(log_path, 'a')
-            except OSError:
-                print_error_and_exit(
-                    "Couldn't create the directory for the log file. Please"
-                    " check prefs.txt to see if it was typed correctly."
-                )
         
     def write(self, s, logging_level=None, server_status=False, chat_log=False,
         timestamp=False, include_date=False):
@@ -182,7 +180,11 @@ class ChatClient():
         elif chat_log:
             # Something we'd put in the chat log file.
             print(to_write)
-            self.log_file.write(to_write + '\n')
+            with open(self.log_filepath, 'a') as f:
+                # Since we open and (implicitly) close the file every time
+                # we write, the writes get saved as they happen.
+                f.write(to_write + '\n')
+                
         # Turns out there are no other kinds of messages that we'd run
         # through this function at the moment.
 
